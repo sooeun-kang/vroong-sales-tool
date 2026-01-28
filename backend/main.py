@@ -1,6 +1,6 @@
 """
 부릉 영업사원용 온보딩 도구 - Backend API
-네이버 지도에서 상점 정보 및 메뉴를 크롤링하고, 부릉 직접주문 웹에 등록합니다.
+네이버 지도에서 상점 정보 및 메뉴를 크롤링하고, Supabase에 등록합니다.
 """
 
 from fastapi import FastAPI, HTTPException, Query
@@ -8,38 +8,44 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 import uvicorn
-import json
 import os
 import uuid
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Supabase 클라이언트
+from supabase import create_client, Client
 
 from crawler import NaverMapCrawler
 
+# 환경변수 로드
+load_dotenv()
+
+# Supabase 설정
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://nuvorgfdclfrfwzrypls.supabase.co")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51dm9yZ2ZkY2xmcmZ3enJ5cGxzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1MjMyNDksImV4cCI6MjA4NTA5OTI0OX0.ZnoIBrhpAEGmUmD325MBmm2nvII10We1N4vFuR32dow")
+
+# Supabase 클라이언트 초기화
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
 app = FastAPI(
     title="부릉 영업사원 도구 API",
-    description="네이버 지도 크롤링을 통한 상점 온보딩",
-    version="2.0.0"
+    description="네이버 지도 크롤링을 통한 상점 온보딩 (Supabase 연동)",
+    version="3.0.0"
 )
 
 # CORS 설정 (프론트엔드 연동)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://vroong-sales-tool.vercel.app",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-# 부릉 직접주문 웹 경로
-VROONG_DIRECT_ORDER_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "vroong-direct-order"
-)
-
-# 온보딩 데이터 파일 경로
-ONBOARDED_JSON_PATH = os.path.join(
-    VROONG_DIRECT_ORDER_PATH,
-    "src", "data", "onboarded.json"
 )
 
 
@@ -114,15 +120,22 @@ def map_category_to_vroong(naver_category: str) -> str:
 
 def generate_menu_id(store_name: str, menu_name: str) -> str:
     """메뉴 ID 생성"""
-    base = f"{store_name}-{menu_name}"
     hash_part = str(uuid.uuid4())[:8]
     return f"menu-{hash_part}"
 
 
-def create_vroong_menu_item(store: StoreInfo, menu: MenuItem, category: str) -> dict:
+def generate_store_id(store_name: str) -> str:
+    """스토어 ID 생성"""
+    # 한글, 영문, 숫자만 남기고 나머지는 하이픈으로
+    store_id = store_name.lower().replace(" ", "-").replace("/", "-").replace("(", "").replace(")", "")[:30]
+    return store_id
+
+
+def create_vroong_menu_item(store: StoreInfo, menu: MenuItem, category: str, store_id: str) -> dict:
     """부릉 직접주문 웹용 메뉴 아이템 생성"""
     return {
         "id": generate_menu_id(store.name, menu.name),
+        "restaurant_id": store_id,
         "restaurant_name": store.name,
         "menu_name": menu.name,
         "price": menu.price,
@@ -145,12 +158,13 @@ def create_vroong_menu_item(store: StoreInfo, menu: MenuItem, category: str) -> 
 async def root():
     return {
         "message": "부릉 영업사원 도구 API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "status": "running",
+        "database": "Supabase",
         "endpoints": {
             "crawl": "POST /api/crawl",
             "onboard": "POST /api/onboard",
-            "preview": "GET /api/preview/{store_id}",
+            "stores": "GET /api/stores",
             "categories": "GET /api/categories"
         }
     }
@@ -177,6 +191,59 @@ async def get_categories():
             {"value": "fastfood", "label": "패스트푸드", "emoji": "🍔"},
         ]
     }
+
+
+@app.get("/api/stores")
+async def get_stores():
+    """등록된 모든 상점 목록 조회"""
+    try:
+        response = supabase.table("stores").select("*").execute()
+        return {
+            "success": True,
+            "stores": response.data,
+            "count": len(response.data)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"상점 조회 오류: {str(e)}")
+
+
+@app.get("/api/stores/{store_id}")
+async def get_store(store_id: str):
+    """특정 상점 및 메뉴 조회"""
+    try:
+        # 상점 정보
+        store_response = supabase.table("stores").select("*").eq("id", store_id).single().execute()
+        
+        # 메뉴 정보
+        menus_response = supabase.table("menus").select("*").eq("restaurant_id", store_id).execute()
+        
+        return {
+            "success": True,
+            "store": store_response.data,
+            "menus": menus_response.data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"상점을 찾을 수 없습니다: {str(e)}")
+
+
+@app.get("/api/menus")
+async def get_menus(category: Optional[str] = None):
+    """메뉴 목록 조회 (카테고리 필터 가능)"""
+    try:
+        query = supabase.table("menus").select("*")
+        
+        if category:
+            query = query.eq("category", category)
+        
+        response = query.execute()
+        
+        return {
+            "success": True,
+            "menus": response.data,
+            "count": len(response.data)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"메뉴 조회 오류: {str(e)}")
 
 
 @app.post("/api/crawl", response_model=CrawlResponse)
@@ -219,35 +286,10 @@ async def crawl_store(request: CrawlRequest):
         raise HTTPException(status_code=500, detail=f"크롤링 오류: {str(e)}")
 
 
-def load_onboarded_data() -> dict:
-    """온보딩된 데이터 로드"""
-    try:
-        if os.path.exists(ONBOARDED_JSON_PATH):
-            with open(ONBOARDED_JSON_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"온보딩 데이터 로드 실패: {e}")
-    
-    return {"stores": [], "menus": [], "last_updated": None}
-
-
-def save_onboarded_data(data: dict):
-    """온보딩된 데이터 저장"""
-    # 디렉토리 확인
-    os.makedirs(os.path.dirname(ONBOARDED_JSON_PATH), exist_ok=True)
-    
-    data["last_updated"] = datetime.now().isoformat()
-    
-    with open(ONBOARDED_JSON_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 @app.post("/api/onboard", response_model=OnboardResponse)
 async def onboard_store(request: OnboardRequest):
     """
-    크롤링한 상점 정보를 부릉 직접주문 웹에 등록
-    
-    vroong-direct-order/src/data/onboarded.json에 데이터를 추가합니다.
+    크롤링한 상점 정보를 Supabase에 등록
     """
     try:
         store = request.store
@@ -256,13 +298,13 @@ async def onboard_store(request: OnboardRequest):
         category = request.category_mapping or map_category_to_vroong(store.category)
         
         # 스토어 ID 생성
-        store_id = store.name.lower().replace(" ", "-").replace("/", "-").replace("(", "").replace(")", "")[:30]
+        store_id = generate_store_id(store.name)
         
         # 메뉴 아이템 생성
         menu_items = []
         for menu in store.menus:
             if menu.name and menu.price > 0:
-                menu_item = create_vroong_menu_item(store, menu, category)
+                menu_item = create_vroong_menu_item(store, menu, category, store_id)
                 menu_items.append(menu_item)
         
         if not menu_items:
@@ -272,11 +314,8 @@ async def onboard_store(request: OnboardRequest):
                 menu_count=0
             )
         
-        # 기존 온보딩 데이터 로드
-        onboarded_data = load_onboarded_data()
-        
         # 스토어 정보 생성
-        store_info = {
+        store_data = {
             "id": store_id,
             "name": store.name,
             "address": store.address,
@@ -287,32 +326,27 @@ async def onboard_store(request: OnboardRequest):
             "onboarded_at": datetime.now().isoformat()
         }
         
-        # 중복 체크 및 업데이트
-        existing_store_ids = [s["id"] for s in onboarded_data["stores"]]
-        if store_id in existing_store_ids:
+        # 기존 상점 확인
+        existing = supabase.table("stores").select("id").eq("id", store_id).execute()
+        
+        if existing.data:
             # 기존 상점 업데이트
-            idx = existing_store_ids.index(store_id)
-            onboarded_data["stores"][idx] = store_info
+            supabase.table("stores").update(store_data).eq("id", store_id).execute()
             # 기존 메뉴 삭제
-            onboarded_data["menus"] = [m for m in onboarded_data["menus"] if m.get("restaurant_id") != store_id]
+            supabase.table("menus").delete().eq("restaurant_id", store_id).execute()
         else:
             # 새 상점 추가
-            onboarded_data["stores"].append(store_info)
+            supabase.table("stores").insert(store_data).execute()
         
-        # 메뉴에 restaurant_id 추가하고 저장
-        for menu_item in menu_items:
-            menu_item["restaurant_id"] = store_id
-            onboarded_data["menus"].append(menu_item)
-        
-        # 저장
-        save_onboarded_data(onboarded_data)
+        # 메뉴 추가
+        supabase.table("menus").insert(menu_items).execute()
         
         return OnboardResponse(
             success=True,
-            message=f"'{store.name}' 상점이 부릉 직접주문 웹에 등록되었습니다!",
+            message=f"'{store.name}' 상점이 부릉에 등록되었습니다!",
             store_id=store_id,
             menu_count=len(menu_items),
-            preview_url=f"/restaurant/{store_id}"
+            preview_url=f"https://vroong-direct-order.vercel.app/restaurant/{store_id}"
         )
         
     except Exception as e:
@@ -321,29 +355,16 @@ async def onboard_store(request: OnboardRequest):
         raise HTTPException(status_code=500, detail=f"온보딩 오류: {str(e)}")
 
 
-@app.get("/api/preview/{store_id}")
-async def preview_store(store_id: str):
-    """
-    등록된 상점의 미리보기 데이터 반환
-    """
-    # 온보딩된 파일 찾기
-    backend_dir = os.path.dirname(__file__)
-    for filename in os.listdir(backend_dir):
-        if filename.startswith("onboarded_") and filename.endswith(".json"):
-            filepath = os.path.join(backend_dir, filename)
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if store_id in data.get("store_name", "").lower().replace(" ", "-"):
-                    return {
-                        "success": True,
-                        "store": data
-                    }
-    
-    return {
-        "success": False,
-        "message": "상점을 찾을 수 없습니다."
-    }
+@app.delete("/api/stores/{store_id}")
+async def delete_store(store_id: str):
+    """상점 삭제 (메뉴도 함께 삭제됨 - CASCADE)"""
+    try:
+        supabase.table("stores").delete().eq("id", store_id).execute()
+        return {"success": True, "message": f"상점 '{store_id}'가 삭제되었습니다."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"삭제 오류: {str(e)}")
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

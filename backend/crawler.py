@@ -18,6 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 from typing import Optional, List, Tuple
+from urllib.parse import urlparse, parse_qs, urlencode
 import asyncio
 import re
 import logging
@@ -29,6 +30,63 @@ logger = logging.getLogger(__name__)
 
 class NaverMapCrawler:
     """네이버 지도 상점 정보 크롤러"""
+    
+    @staticmethod
+    def clean_naver_url(url: str) -> str:
+        """
+        네이버 지도 URL을 정제하여 Selenium에서 사용 가능한 형태로 변환
+        
+        다양한 URL 형식 지원:
+        - https://map.naver.com/p/search/.../place/1234567890
+        - https://map.naver.com/p/entry/place/1234567890
+        - https://map.naver.com/p/smart-around/place/1234567890?...
+        - https://naver.me/xxxxx (단축 URL)
+        """
+        try:
+            # 공백 제거
+            url = url.strip()
+            
+            # place ID 추출 시도 (여러 패턴)
+            patterns = [
+                r'/place/(\d+)',           # 일반적인 place ID
+                r'/restaurant/(\d+)',      # 레스토랑
+                r'/entry/place/(\d+)',     # entry 형식
+            ]
+            
+            place_id = None
+            for pattern in patterns:
+                match = re.search(pattern, url)
+                if match:
+                    place_id = match.group(1)
+                    break
+            
+            if place_id:
+                # 깔끔한 URL로 재구성
+                clean_url = f"https://map.naver.com/p/entry/place/{place_id}"
+                logger.info(f"URL 정제: {url[:50]}... -> {clean_url}")
+                return clean_url
+            
+            # place ID를 찾지 못한 경우, 기본 정제만 수행
+            # 쿼리 파라미터 중 문제가 될 수 있는 것들 제거
+            parsed = urlparse(url)
+            
+            # placePath 등의 중첩된 파라미터 제거
+            if parsed.query:
+                params = parse_qs(parsed.query)
+                # 필수 파라미터만 유지
+                safe_params = {k: v[0] for k, v in params.items() 
+                              if k in ['c', 'searchCoord']}
+                clean_query = urlencode(safe_params) if safe_params else ""
+                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if clean_query:
+                    clean_url += f"?{clean_query}"
+                return clean_url
+            
+            return url
+            
+        except Exception as e:
+            logger.warning(f"URL 정제 실패, 원본 사용: {e}")
+            return url
     
     # 셀렉터 정의 (여러 버전 지원)
     SELECTORS = {
@@ -91,6 +149,8 @@ class NaverMapCrawler:
     
     def _init_driver(self):
         """Chrome WebDriver 초기화"""
+        import os
+        
         options = Options()
         options.add_argument("--headless=new")  # 새 헤드리스 모드
         options.add_argument("--no-sandbox")
@@ -100,11 +160,28 @@ class NaverMapCrawler:
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         
+        # Cloud Run / Docker 환경 지원
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-setuid-sandbox")
+        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument("--single-process")
+        
+        # Chrome 바이너리 경로 (Docker 환경)
+        chrome_bin = os.getenv("CHROME_BIN")
+        if chrome_bin:
+            options.binary_location = chrome_bin
+        
         # 자동화 탐지 방지
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
         
-        service = Service(ChromeDriverManager().install())
+        # ChromeDriver 경로 확인 (Docker 환경 우선)
+        chromedriver_path = os.getenv("CHROMEDRIVER_PATH")
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            service = Service(chromedriver_path)
+        else:
+            service = Service(ChromeDriverManager().install())
+        
         self.driver = webdriver.Chrome(service=service, options=options)
         self.driver.implicitly_wait(5)
         
@@ -154,13 +231,15 @@ class NaverMapCrawler:
         Returns:
             상점 정보 딕셔너리 또는 None
         """
-        logger.info(f"크롤링 시작: {naver_map_url}")
+        # URL 정제 (복잡한 쿼리 파라미터 제거)
+        clean_url = self.clean_naver_url(naver_map_url)
+        logger.info(f"크롤링 시작: {clean_url}")
         
         try:
             self._init_driver()
             
             # URL 접속
-            self.driver.get(naver_map_url)
+            self.driver.get(clean_url)
             await asyncio.sleep(3)
             
             # iframe 전환 시도
