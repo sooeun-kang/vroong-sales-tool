@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react'
 import './index.css'
 
+// ==================== API Configuration ====================
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 // ==================== Types ====================
 
 interface MenuItem {
@@ -63,7 +67,7 @@ function App() {
 
   // Fetch categories on mount
   useEffect(() => {
-    fetch('http://localhost:8000/api/categories')
+    fetch(`${API_BASE_URL}/api/categories`)
       .then(res => res.json())
       .then(data => setCategories(data.categories || []))
       .catch(() => {
@@ -97,7 +101,7 @@ function App() {
     setViewMode('result')
 
     try {
-      const response = await fetch('http://localhost:8000/api/crawl', {
+      const response = await fetch(`${API_BASE_URL}/api/crawl`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -159,7 +163,7 @@ function App() {
     setError(null)
 
     try {
-      const response = await fetch('http://localhost:8000/api/onboard', {
+      const response = await fetch(`${API_BASE_URL}/api/onboard`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
